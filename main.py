@@ -1,19 +1,31 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import Depends, FastAPI, Request, HTTPException
 import xgboost as xgb
 import pandas as pd
 import os
+import secrets
 
 app = FastAPI()
 API_KEY = os.environ.get("XGBOOST_API_KEY", "")
+
+def require_api_key(req: Request):
+    # Keep liveness public, but never serve model requests without a server key.
+    if not API_KEY or not API_KEY.strip():
+        raise HTTPException(status_code=503, detail="authentication_not_configured")
+    authorization = req.headers.get("authorization", "")
+    if not secrets.compare_digest(
+        authorization.encode("utf-8"), f"Bearer {API_KEY}".encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=401, detail="unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 @app.get("/")
 def health():
     return {"status": "ok"}
 
-@app.post("/train")
+@app.post("/train", dependencies=[Depends(require_api_key)])
 async def train(req: Request):
-    if API_KEY and req.headers.get("authorization") != f"Bearer {API_KEY}":
-        raise HTTPException(status_code=401, detail="unauthorized")
     body = await req.json()
     rows = [r for r in body.get("training_data", []) if r.get("was_accurate") is not None]
     if len(rows) < 10:
@@ -26,10 +38,8 @@ async def train(req: Request):
     model.save_model("/tmp/model.json")
     return {"status": "trained", "rows": len(df), "features": X.shape[1]}
 
-@app.post("/predict")
+@app.post("/predict", dependencies=[Depends(require_api_key)])
 async def predict(req: Request):
-    if API_KEY and req.headers.get("authorization") != f"Bearer {API_KEY}":
-        raise HTTPException(status_code=401, detail="unauthorized")
     
     try:
         model = xgb.XGBClassifier()
@@ -51,4 +61,3 @@ async def predict(req: Request):
         "predictions": predictions.tolist(),
         "probabilities": probabilities.tolist()
     }
-
